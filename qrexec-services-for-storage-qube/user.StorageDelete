@@ -1,0 +1,14 @@
+#!/bin/bash
+set -euo pipefail
+
+BASEPATH="/home/user/shared"
+read REL || { echo "Missing path" >&2; exit 2; }
+
+SAFE="$(realpath -m "$BASEPATH/$REL")"
+if [[ "$SAFE" != "$BASEPATH"* || ! -f "$SAFE" ]]; then
+  echo "Invalid file" >&2
+  exit 2
+fi
+
+rm -f -- "$SAFE"
+echo "OK"

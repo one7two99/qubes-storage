@@ -1,0 +1,46 @@
+#!/bin/bash
+set -euo pipefail
+
+BASEPATH="/home/user/shared"
+#MAX_BYTES="${MAX_BYTES:-104857600}"  # 100 MiB default
+MAX_BYTES="${MAX_BYTES:-1000000}"  # 100 MiB default
+
+
+
+# Dupliziere stdin auf FD 3, damit wir die erste Zeile (Pfad) abziehen
+exec 3<&0
+IFS= read -r REL <&3 || { echo "Missing path" >&2; exit 2; }
+
+SAFE="$(realpath -m -- "$BASEPATH/$REL")"
+if [[ "$SAFE" != "$BASEPATH"* ]]; then
+  echo "Invalid path" >&2
+  exit 2
+fi
+
+DIR="$(dirname -- "$SAFE")"
+mkdir -p -- "$DIR"
+
+TMP="$(mktemp --tmpdir="$DIR" .put-XXXXXX)"
+trap 'rm -f -- "$TMP"' EXIT
+
+# WICHTIG: Code via -c, Daten via stdin von FD 3
+python3 -c '
+import sys
+dst, limit = sys.argv[1], int(sys.argv[2])
+read_bytes = 0
+with open(dst, "wb") as f:
+    while True:
+        chunk = sys.stdin.buffer.read(1024*1024)
+        if not chunk:
+            break
+        read_bytes += len(chunk)
+        if read_bytes > limit:
+            sys.stderr.write("File too large\n")
+            sys.exit(3)
+        f.write(chunk)
+' "$TMP" "$MAX_BYTES" <&3
+
+chmod 0640 -- "$TMP"
+mv -f -- "$TMP" "$SAFE"
+trap - EXIT
+echo "OK"

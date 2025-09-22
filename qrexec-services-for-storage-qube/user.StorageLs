@@ -1,0 +1,14 @@
+#!/bin/bash
+set -euo pipefail
+
+BASEPATH="/home/user/shared"
+read REL || REL="."
+SAFE="$(realpath -m "$BASEPATH/$REL")"
+
+if [[ "$SAFE" != "$BASEPATH"* || ! -d "$SAFE" ]]; then
+  echo "Invalid directory" >&2
+  exit 2
+fi
+
+# Ausgabe: Details ähnlich wie "ls -l"
+ls -lA -- "$SAFE"

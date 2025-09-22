@@ -1,0 +1,15 @@
+#!/bin/bash
+set -euo pipefail
+
+BASEPATH="/home/user/shared"
+read REL || REL="."
+SAFE="$(realpath -m "$BASEPATH/$REL")"
+
+if [[ "$SAFE" != "$BASEPATH"* || ! -d "$SAFE" ]]; then
+  echo "Invalid directory" >&2
+  exit 2
+fi
+
+# Menschlich: Verzeichnisse mit /
+find "$SAFE" -mindepth 1 -maxdepth 1 -printf '%f%y\n' | \
+  sed -E 's/d$/\//; s/f$//; s/l$/@/' | sort

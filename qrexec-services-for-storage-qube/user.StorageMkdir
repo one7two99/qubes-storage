@@ -1,0 +1,14 @@
+#!/bin/bash
+set -euo pipefail
+
+BASEPATH="/home/user/shared"
+
+IFS= read -r DIR || { echo "Missing dirname" >&2; exit 2; }
+
+SAFE="$(realpath -m -- "$BASEPATH/$DIR")"
+if [[ "$SAFE" != "$BASEPATH"* ]]; then
+  echo "Invalid path" >&2
+  exit 2
+fi
+
+mkdir -p -- "$SAFE"
