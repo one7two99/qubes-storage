@@ -221,7 +221,6 @@ Serverseitige Fehlerfälle provozieren („Invalid path“, zu große Datei), um
 - **`Invalid path`:** Pfad liegt außerhalb `BASEPATH` oder Ziel existiert nicht. Pfade ohne führendes `/` verwenden (Client normalisiert korrekt).
 - **`File too large` (Exit 3):** `MAX_BYTES` erhöhen oder Datei segmentieren.
 - **`rmdir: Directory not empty`:** Erst Inhalte löschen oder `StorageMove` nutzen, um umzustrukturieren.
-- **`gui-get`:** Falls `user.StorageListFiles` fehlt, wie oben beschrieben ersetzen oder hinzufügen.
 
 ---
 
