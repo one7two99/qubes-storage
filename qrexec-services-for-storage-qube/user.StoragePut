@@ -2,10 +2,7 @@
 set -euo pipefail
 
 BASEPATH="/home/user/shared"
-#MAX_BYTES="${MAX_BYTES:-104857600}"  # 100 MiB default
-MAX_BYTES="${MAX_BYTES:-1000000}"  # 100 MiB default
-
-
+MAX_BYTES="${MAX_BYTES:-104857600}"  # 100 MiB default
 
 # Dupliziere stdin auf FD 3, damit wir die erste Zeile (Pfad) abziehen
 exec 3<&0
