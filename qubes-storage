@@ -1,0 +1,188 @@
+#!/bin/bash
+set -euo pipefail
+
+# Set storage Qube
+STORAGE_VM="my-data"
+
+# read current path in storage qube from the state file or setup the state file
+STATEFILE="${XDG_CACHE_HOME:-$HOME/.cache}/qubes-storage-path"
+mkdir -p "$(dirname "$STATEFILE")"
+[ -f "$STATEFILE" ] || echo "." > "$STATEFILE"
+
+# print available commands
+usage() {
+  echo qubes-storage v0.1 - 22.09.2025
+  echo
+  echo "Usage:"
+  echo "  qubes-storage list [dir]"
+  echo "  qubes-storage ls [dir]"
+  echo "  qubes-storage get <remote-file> [local-dest]"
+  echo "  qubes-storage put <localfile> [remote-path]"
+  echo "  qubes-storage delete <remote-file>"
+  echo "  qubes-storage copy <remote-file> [remote-dir]<remote-file>"
+  echo "  qubes-storage move <remote-file> [remote-dir]<remote-file>"
+  echo "  qubes-storage mkdir <remote-dir>"
+  echo "  qubes-storage rmdir <remote-dir>"
+  echo "  qubes-storage stat <remote-file>"
+  echo "  qubes-storage cd <remote-dir>"
+  echo "  qubes-storage pwd"
+  echo "  qubes-storage gui-get"
+  echo "  qubes-storage gui-put"
+  echo "  qubes-storage edit <remote-file>"
+  echo
+}
+
+get_current_path() {
+  cat "$STATEFILE"
+}
+
+set_current_path() {
+  echo "$1" > "$STATEFILE"
+}
+
+# Pfad-Normalisierung rein textuell (ohne Bezug zur lokalen PWD):
+# - Wenn add absolut ist (/foo), ignoriere base.
+# - Normalisiere an einer künstlichen Root "/" und entferne dann das führende "/".
+normalize_remote() {
+  local base="$1" add="$2" combined norm
+  if [[ "${add}" = /* ]]; then
+    combined="${add}"
+  else
+    base="${base:-.}"
+    combined="${base}/${add}"
+  fi
+  norm="$(realpath -m "/${combined}")" || norm="/"
+  norm="${norm#/}"
+  [[ -z "$norm" ]] && norm="."
+  printf '%s\n' "$norm"
+}
+
+# Hilfsfunktion: base (STATEFILE) + relativer Zusatz -> normalisierter Remote-Pfad
+resolve_remote() {
+  local base; base="$(get_current_path)"
+  normalize_remote "$base" "${1:-.}"
+}
+
+# Keine Argumente → Hilfe anzeigen
+if [ $# -eq 0 ]; then
+  usage
+  exit 0
+fi
+
+case "$1" in
+  list)
+    REMOTE="$(resolve_remote "${2:-.}")"
+    printf '%s\n' "$REMOTE" | qrexec-client-vm "$STORAGE_VM" user.StorageList
+    ;;
+  ls)
+    REMOTE="$(resolve_remote "${2:-.}")"
+    printf '%s\n' "$REMOTE" | qrexec-client-vm "$STORAGE_VM" user.StorageLs
+    ;;
+  get)
+    [ -z "${2:-}" ] && usage && exit 1
+    SRC="$(resolve_remote "$2")"
+    DST="${3:-$(basename "$2")}"
+    if ! printf '%s\n' "$SRC" | qrexec-client-vm "$STORAGE_VM" user.StorageGet > "$DST"; then
+      echo "Fehler: get fehlgeschlagen" >&2
+      exit 1
+    fi
+    ;;
+  put)
+    [ -z "${2:-}" ] && usage && exit 1
+    LOCALFILE="$2"
+    REMOTENAME="${3:-$(basename "$2")}"
+    REMOTE="$(resolve_remote "$REMOTENAME")"
+    { printf '%s\n' "$REMOTE"; cat -- "$LOCALFILE"; } | \
+        qrexec-client-vm "$STORAGE_VM" user.StoragePut
+    ;;
+  mkdir)
+    DIR="$2"
+    if [ -z "$DIR" ]; then
+      echo "Usage: $0 mkdir <dirname>"
+      exit 1
+    fi
+    printf '%s\n' "$DIR" | \
+      qrexec-client-vm "$STORAGE_VM" user.StorageMkdir
+    ;;
+  rmdir)
+    DIR="$2"
+    if [ -z "$DIR" ]; then
+      echo "Usage: $0 rmdir <dirname>"
+      exit 1
+    fi
+    printf '%s\n' "$DIR" | \
+      qrexec-client-vm "$STORAGE_VM" user.StorageRmdir
+    ;;
+  copy)
+    SRC="$2"
+    DST="$3"
+    if [ -z "$SRC" ] || [ -z "$DST" ]; then
+      echo "Usage: $0 copy <source> <dest>"
+      exit 1
+    fi
+    { printf '%s\n%s\n' "$SRC" "$DST"; } | \
+      qrexec-client-vm "$STORAGE_VM" user.StorageCopy
+    ;;
+  move)
+    SRC="$2"
+    DST="$3"
+    if [ -z "$SRC" ] || [ -z "$DST" ]; then
+      echo "Usage: $0 move <source> <dest>"
+      exit 1
+    fi
+    { printf '%s\n%s\n' "$SRC" "$DST"; } | \
+      qrexec-client-vm "$STORAGE_VM" user.StorageMove
+    ;;
+  delete)
+    [ -z "${2:-}" ] && usage && exit 1
+    REMOTE="$(resolve_remote "$2")"
+    printf '%s\n' "$REMOTE" | qrexec-client-vm "$STORAGE_VM" user.StorageDelete
+    ;;
+  stat|details)
+    [ -z "${2:-}" ] && usage && exit 1
+    REMOTE="$(resolve_remote "$2")"
+    printf '%s\n' "$REMOTE" | qrexec-client-vm "$STORAGE_VM" user.StorageStat
+    ;;
+  cd)
+    [ -z "${2:-}" ] && usage && exit 1
+    NEW="$(normalize_remote "$(get_current_path)" "$2")"
+    set_current_path "$NEW"
+    echo "Remote directory: $NEW"
+    ;;
+  pwd)
+    echo "Remote directory: $(get_current_path)"
+    ;;
+  gui-get)
+    BASE="$(get_current_path)"
+    FILE="$(printf '%s\n' "$BASE" | qrexec-client-vm "$STORAGE_VM" user.StorageListFiles | rofi -dmenu -p "Datei auswählen:")"
+    [ -z "$FILE" ] && echo "Abgebrochen" && exit 1
+    REMOTE="$(resolve_remote "$FILE")"
+    printf '%s\n' "$REMOTE" | qrexec-client-vm "$STORAGE_VM" user.StorageGet > "$(basename "$FILE")"
+    ;;
+  gui-put)
+    BASE="$(get_current_path)"
+    FILE="$(zenity --file-selection --title="Datei hochladen")"
+    [ -z "$FILE" ] && echo "Abgebrochen" && exit 1
+    REMOTE="$(resolve_remote "$(basename "$FILE")")"
+    { printf '%s\n' "$REMOTE"; cat -- "$FILE"; } | \
+        qrexec-client-vm "$STORAGE_VM" user.StoragePut
+    ;;
+  edit)
+    [ -z "${2:-}" ] && usage && exit 1
+    REMOTE="$(resolve_remote "$2")"
+    TMP="$(mktemp)"
+    if ! printf '%s\n' "$REMOTE" | qrexec-client-vm "$STORAGE_VM" user.StorageGet > "$TMP"; then
+      rm -f "$TMP"
+      exit 1
+    fi
+    ${EDITOR:-nano} "$TMP"
+    { printf '%s\n' "$REMOTE"; cat -- "$TMP"; } | qrexec-client-vm "$STORAGE_VM" user.StoragePut
+    rm -f "$TMP"
+    ;;
+  -h|--help)
+    usage; exit 0
+    ;;
+  *)
+    usage; exit 1
+    ;;
+esac
