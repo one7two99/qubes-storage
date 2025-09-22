@@ -1,7 +1,5 @@
 # qubes-storage — Sicherer Datei-Zugriff über Qrexec
 
-> Stand: 22.09.2025 • Version: v0.1 (aus Skriptkopf)
-
 Dieses Projekt bietet ein minimales, aber hart abgesichertes Dateispeicher-Interface für Qubes OS.  
 Ein **Storage‑Qube** (z. B. `storage-qube`) hält die Daten unter einem festgelegten Wurzelverzeichnis. Andere AppVMs greifen **nur per Qrexec** auf diesen Speicher zu – ohne Netzfreigaben und ohne direkt gemountete Volumes.
 
@@ -238,7 +236,10 @@ Serverseitige Fehlerfälle provozieren („Invalid path“, zu große Datei), um
 
 ## Lizenz
 
-*(Platzhalter – ergänzen Sie die passende Lizenz, z. B. MIT oder GPL‑3.0.)*
+Creative Commons Attribution-NonCommercial 4.0 International Public License
+- freie private, nichtkommerzielle Nutzung,
+- Namensnennung ist verpflichtend,
+- kommerzielle Nutzung nur mit Zustimmung.
 
 ---
 
