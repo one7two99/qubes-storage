@@ -154,7 +154,7 @@ case "$1" in
     ;;
   gui-get)
     BASE="$(get_current_path)"
-    FILE="$(printf '%s\n' "$BASE" | qrexec-client-vm "$STORAGE_VM" user.StorageListFiles | rofi -dmenu -p "Datei auswählen:")"
+    FILE="$(printf '%s\n' "$BASE" | qrexec-client-vm "$STORAGE_VM" user.StorageList | rofi -dmenu -p "Datei auswählen:")"
     [ -z "$FILE" ] && echo "Abgebrochen" && exit 1
     REMOTE="$(resolve_remote "$FILE")"
     printf '%s\n' "$REMOTE" | qrexec-client-vm "$STORAGE_VM" user.StorageGet > "$(basename "$FILE")"
