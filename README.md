@@ -5,7 +5,6 @@ Ein **Storage‑Qube** (z. B. `storage-qube`) hält die Daten unter einem fest
 
 Das CLI‑Werkzeug `qubes-storage` in den anfragenden VMs kapselt die Qrexec‑Aufrufe und stellt eine benutzerfreundliche Oberfläche bereit. Auf der Serverseite (im Storage‑Qube) sorgen Qrexec‑Service‑Skripte (`user.Storage…`) für strikte Pfadvalidierung, Größenlimits und atomare Schreibvorgänge.
 
----
 
 ## Architektur
 
@@ -22,7 +21,6 @@ Statefile: ~/.cache/qubes-storage-path   Datenwurzel: /home/user/shared
 - **Server:** Qrexec‑Dienste `user.Storage(List, Ls, Get, Put, Copy, Move, Delete, Mkdir, Rmdir, Stat)`, jeweils als eigenständige Skripte.
 - **Dom0‑Policy:** Legt fest, dass *nur* der definierte Storage‑Qube Ziel der Dienste ist.
 
----
 
 ## Sicherheitsmodell (Kurzfassung)
 
@@ -38,7 +36,6 @@ Statefile: ~/.cache/qubes-storage-path   Datenwurzel: /home/user/shared
    - `3` bei Überschreitung `MAX_BYTES`,
    - `1` bei nicht gefundenen Quellen (z. B. `Move/Copy`).
 
----
 
 ## Komponenten
 
@@ -82,7 +79,6 @@ Standard‑`BASEPATH`: `/home/user/shared` (anpassbar je Skriptkopf).
 | `user.StorageRmdir`  | Verzeichnisname (1 Zeile)                | —                                   | `rmdir` (scheitert, wenn nicht leer) |
 | `user.StorageStat`   | Pfad (1 Zeile)                           | `stat`‑Ausgabe                      | Metadaten |
 
----
 
 ## Installation
 
@@ -134,7 +130,6 @@ user.StorageRmdir *  storage-qube  allow
    - `zenity` (für `gui-put`),
    - `$EDITOR` (für `edit`; Standard ist `nano`).
 
----
 
 ## Konfiguration
 
@@ -147,7 +142,6 @@ user.StorageRmdir *  storage-qube  allow
   ```
   *Hinweis:* In `user.StoragePut` steht derzeit `MAX_BYTES=1000000` (≈1 MiB) im Code. Passen Sie dies an oder exportieren Sie `MAX_BYTES` in der Service‑Umgebung.
 
----
 
 ## Verwendung (Beispiele)
 
@@ -181,8 +175,6 @@ qubes-storage gui-get
 
 **Exitcodes & Fehlertexte** sind sprechend gehalten (z. B. „Invalid path“, „File too large“). Beim `get` meldet das CLI „Fehler: get fehlgeschlagen“ und gibt Code 1 zurück.
 
----
-
 ## Erweiterungen / Roadmap
 
 - **`user.StorageListFiles`:** Das CLI referenziert diesen Dienst in `gui-get`. Entweder:
@@ -193,7 +185,6 @@ qubes-storage gui-get
 - **Logging/Auditing:** Audit‑Trails in der Storage‑VM, z. B. via `logger` mit `QREXEC_REMOTE_DOMAIN`.
 - **Paketierung:** RPM/DEB für einfache Verteilung; systemweiter `DEFAULT_BASEPATH` in `/etc/default/qubes-storage`.
 
----
 
 ## Testen
 
@@ -213,7 +204,6 @@ diff -u /tmp/hello.txt /tmp/hello.out
 
 Serverseitige Fehlerfälle provozieren („Invalid path“, zu große Datei), um Policy und Limits zu verifizieren.
 
----
 
 ## Troubleshooting
 
@@ -222,7 +212,6 @@ Serverseitige Fehlerfälle provozieren („Invalid path“, zu große Datei), um
 - **`File too large` (Exit 3):** `MAX_BYTES` erhöhen oder Datei segmentieren.
 - **`rmdir: Directory not empty`:** Erst Inhalte löschen oder `StorageMove` nutzen, um umzustrukturieren.
 
----
 
 ## Sicherheitshinweise
 
@@ -231,7 +220,6 @@ Serverseitige Fehlerfälle provozieren („Invalid path“, zu große Datei), um
 - Keine nicht‑validierten Daten an Shell‑Expansion übergeben; dieses Repo nutzt ausschließlich `stdin` und `--`‑Optionen.
 - Optional die Storage‑VM vom Netz trennen.
 
----
 
 ## Lizenz
 
@@ -240,7 +228,6 @@ Creative Commons Attribution-NonCommercial 4.0 International Public License
 - Namensnennung ist verpflichtend,
 - kommerzielle Nutzung nur mit Zustimmung.
 
----
 
 ## Dateien im Repository
 
