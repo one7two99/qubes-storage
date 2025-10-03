@@ -27,7 +27,7 @@ Statefile: ~/.cache/qubes-storage-path   Datenwurzel: /home/user/shared
 1. **Pfad‑Jail:** Alle Dienste berechnen `SAFE` mit `realpath -m` relativ zu `BASEPATH` (Standard: `/home/user/shared`) und lehnen alles außerhalb ab (`[[ "$SAFE" != "$BASEPATH"* ]]`). Path‑Traversal (`../`) ist damit blockiert.
 2. **Größenlimits:** `Get` und `Put` respektieren `MAX_BYTES` (Umgebungsvariable). Standard im Code:
    - `user.StorageGet`: `MAX_BYTES=104857600` (100 MiB)
-   - `user.StoragePut`: **aktuell** `MAX_BYTES=1000000` (≈1 MiB) – Kommentar nennt 100 MiB. *Empfehlung:* Anpassen (siehe Konfiguration).
+   - `user.StoragePut`: `MAX_BYTES=104857600` (100 MiB)
 3. **Atomare Writes:** `Put`/`Copy` schreiben in eine temporäre Datei im Zielverzeichnis und `mv`en diese anschließend (Crash‑sicherer, keine Teilzustände).
 4. **Minimal‑Oberfläche:** Kein Shell‑Globbing auf Serverseite; Parameter kommen über `stdin` (eine oder zwei Zeilen), wodurch Sonderzeichen robust sind.
 5. **Rechte:** `Put` setzt `chmod 0640` auf neue Dateien.
