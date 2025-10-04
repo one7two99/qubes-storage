@@ -1,0 +1,398 @@
+#!/bin/bash
+# qubes-storage-browse — fzf-based TUI browser for a Qubes storage qube
+# - Backend: `qubes-storage` (must be in PATH)
+# - Enter: open dir / edit file
+# - Ctrl bindings for actions (no Alt)
+# - Preview pane: toggle between stats/content and footer; persistent across actions/dir changes
+# - Push (Ctrl+W) • Jump (Ctrl+J) • View full (Ctrl+F)
+# - Preview caching with fingerprint (size+modify) to stay fresh
+set -euo pipefail
+
+BACKEND="${BACKEND:-qubes-storage}"
+FZF_BIN="${FZF_BIN:-fzf}"
+
+# Preview tuning (adjust as needed)
+PREVIEW_MAX_BYTES=$((1024*1024))                    # up to 1 MiB for content preview
+PREVIEW_MAX_LINES=${PREVIEW_MAX_LINES:-200}         # how many lines to show in preview
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/qubes-storage-browse"
+mkdir -p "$CACHE_DIR"
+
+MODE_FILE="$CACHE_DIR/preview_mode"                 # persists preview mode: "content" or "footer"
+
+err()  { printf "Error: %s\n" "$*" >&2; }
+need() { command -v "$1" >/dev/null 2>&1 || { err "Missing dependency: $1"; exit 1; }; }
+
+need "$BACKEND"
+need "$FZF_BIN"
+need less
+command -v sha256sum >/dev/null 2>&1 || true
+command -v file >/dev/null 2>&1 || true
+command -v hexdump >/dev/null 2>&1 || true
+
+BACKEND_PATH="$(command -v "$BACKEND")"
+
+# --- Storage-VM-Namen direkt aus dem Backend-Skript extrahieren (kein Config-Fallback) ---
+get_storage_vm_name() {
+  # ENV hat Vorrang (ad-hoc override)
+  if [ -n "${STORAGE_VM:-}" ]; then
+    printf '%s' "$STORAGE_VM"
+    return 0
+  fi
+
+  # Pfad zum Backend-Skript finden
+  local bpath
+  bpath="$(command -v "$BACKEND" 2>/dev/null || true)"
+
+  # Falls lesbar: Zeile STORAGE_VM=... robust parsen (mit/ohne export, mit/ohne Quotes)
+  if [ -n "$bpath" ] && [ -r "$bpath" ]; then
+    local line val
+    line="$(grep -E '^[[:space:]]*(export[[:space:]]+)?STORAGE_VM[[:space:]]*=' "$bpath" | head -n1 || true)"
+    if [ -n "$line" ]; then
+      val="${line#*=}"                                            # RHS nach dem ersten =
+      val="$(printf '%s' "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"  # trim
+      case "$val" in
+        \"*\") val="${val%\"}"; val="${val#\"}";;                 # umschließende "…"
+        \'*\') val="${val%\'}"; val="${val#\'}";;                 # umschließende '…'
+      esac
+      printf '%s' "$val"
+      return 0
+    fi
+  fi
+
+  # Letzter Fallback
+  printf 'unknown'
+}
+
+get_remote_dir() {
+  "$BACKEND" pwd | sed -n 's/^Remote directory: //p'
+}
+
+list_entries() {
+  local base
+  base="$(get_remote_dir)"
+  if [ "$base" != "." ]; then
+    echo ".."
+  fi
+  "$BACKEND" ls || true
+}
+
+is_dir() {
+  "$BACKEND" stat "$1" 2>/dev/null | grep -q "directory$"
+}
+
+prompt_tty() {
+  local msg="$1"
+  printf "%s" "$msg" > /dev/tty
+  local ans
+  IFS= read -r ans < /dev/tty || true
+  printf "%s" "$ans"
+}
+
+confirm_tty() {
+  local msg="$1"
+  printf "%s [y/N] " "$msg" > /dev/tty
+  local ans
+  IFS= read -r ans < /dev/tty || true
+  case "${ans,,}" in
+    y|yes) return 0 ;;
+    *)     return 1 ;;
+  esac
+}
+
+show_help() {
+  cat << 'EOF'
+FULL HELP
+---------
+Enter   : Edit file OR enter directory
+Ctrl+F  : View file (full content) in less
+Ctrl+P  : Pull file to current local directory
+Ctrl+W  : Push local file into current remote directory
+Ctrl+U  : Go up (cd ..)
+Ctrl+J  : Jump to remote path (cd <path>)
+Ctrl+D  : Delete (file -> rm, dir -> rmdir)  [confirm]
+Ctrl+N  : Create directory (mkdir)
+Ctrl+R  : Rename/Move (mv to new path or new name)
+Ctrl+Y  : Copy (cp to new path)
+Ctrl+S  : Show stat in pager
+Ctrl+H  : Show footer (commands) in preview pane  [PERSISTENT]
+Ctrl+G  : Back to stats/content in preview pane   [PERSISTENT]
+Ctrl+O  : Open this full help in pager
+Esc     : Quit
+
+NOTES
+-----
+• PREVIEW_MAX_LINES controls how many lines are shown in content preview (default 200).
+• Preview mode is persistent across directory changes and actions.
+• Preview cache auto-refreshes when file size or modify timestamp changes.
+EOF
+}
+
+HELP_FOOTER=$'COMMANDS:\nEnter=open/edit | Ctrl+F=view | Ctrl+U=up | Ctrl+J=jump | Ctrl+P=pull | Ctrl+W=push | Ctrl+D=delete | Ctrl+N=mkdir | Ctrl+R=rename/move | Ctrl+Y=copy | Ctrl+S=stat | Ctrl+H=footer | Ctrl+G=stats/content | Ctrl+O=help | Esc=quit'
+
+# ---------- Cache/Fingerprint helpers ----------
+_cache_key_for() {
+  local item="$1"
+  local remote_dir; remote_dir="$(get_remote_dir)"
+  printf '%s/%s' "$remote_dir" "$item"
+}
+
+_cache_file_for() {
+  local key; key="$(_cache_key_for "$1")"
+  if command -v sha256sum >/dev/null 2>&1; then
+    local id; id="$(printf '%s' "$key" | sha256sum | awk '{print $1}')"
+    printf '%s/%s.preview' "$CACHE_DIR" "$id"
+  else
+    printf '%s/%s.preview' "$CACHE_DIR" "$(printf '%s' "$key" | tr '/ %:\t' '____')"
+  fi
+}
+
+_meta_file_for() {
+  local cache; cache="$(_cache_file_for "$1")"
+  printf '%s.meta' "$cache"
+}
+
+_fingerprint_for_remote() {
+  local item="$1"
+  local size modify
+  size="$("$BACKEND_PATH" stat "$item" 2>/dev/null | awk '/^ *Size:/ {print $2; exit}')"
+  modify="$("$BACKEND_PATH" stat "$item" 2>/dev/null | sed -n 's/^ *Modify: //p' | head -n1)"
+  printf '%s|%s' "${size:-0}" "${modify:-unknown}"
+}
+
+_ensure_fresh_cache() {
+  local item="$1"
+  local cache; cache="$(_cache_file_for "$item")"
+  local meta;  meta="$(_meta_file_for  "$item")"
+
+  if is_dir "$item"; then
+    return 0
+  fi
+
+  local fp; fp="$(_fingerprint_for_remote "$item")"
+  local old=""
+  [ -s "$meta" ] && old="$(cat -- "$meta" 2>/dev/null || true)"
+
+  if [ ! -s "$cache" ] || [ "$fp" != "$old" ]; then
+    if ! "$BACKEND_PATH" pull "$item" "$cache" 2>/dev/null; then
+      return 1
+    fi
+    printf '%s' "$fp" > "$meta"
+  fi
+  return 0
+}
+
+# ---------- Preview/View subcommands ----------
+_preview_item() {
+  local item="$1"
+
+  if [ -z "$item" ] || [ "$item" = ".." ]; then
+    echo "(go up)"
+    return 0
+  fi
+
+  if is_dir "$item"; then
+    echo "[directory]"
+    echo
+    "$BACKEND_PATH" stat "$item" 2>/dev/null || true
+    return 0
+  fi
+
+  if ! _ensure_fresh_cache "$item"; then
+    echo "(failed to fetch file content)"
+    echo
+    "$BACKEND_PATH" stat "$item" 2>/dev/null || true
+    return 0
+  fi
+
+  local cache_file; cache_file="$(_cache_file_for "$item")"
+  local size mime="unknown"
+  size="$("$BACKEND_PATH" stat "$item" 2>/dev/null | awk '/^ *Size:/ {print $2; exit}')"
+  command -v file >/dev/null 2>&1 && mime="$(file -b --mime-type -- "$cache_file" 2>/dev/null || echo unknown)"
+
+  echo "[file]  $item"
+  echo "size: ${size:-0} bytes  (preview limits: ${PREVIEW_MAX_BYTES} bytes, ${PREVIEW_MAX_LINES} lines)"
+  printf '%*s\n' 60 '' | tr ' ' '─'
+  echo
+  echo "mime: ${mime}"
+  printf '%*s\n' 60 '' | tr ' ' '─'
+  echo
+
+  if [ "${size:-0}" -gt "$PREVIEW_MAX_BYTES" ] 2>/dev/null; then
+    echo "(file too large for content preview; showing stat)"
+    echo
+    "$BACKEND_PATH" stat "$item" 2>/dev/null || true
+    return 0
+  fi
+
+  case "$mime" in
+    text/*|application/json|application/xml|application/x-sh|application/x-shellscript)
+      sed -n "1,${PREVIEW_MAX_LINES}p" -- "$cache_file"
+      ;;
+    *)
+      if command -v hexdump >/dev/null 2>&1; then
+        hexdump -C -n 1024 -- "$cache_file"
+      else
+        head -c 1024 -- "$cache_file"
+      fi
+      ;;
+  esac
+}
+
+_view_item_full() {
+  local item="$1"
+  if [ -z "$item" ] || [ "$item" = ".." ]; then
+    echo "No file selected." > /dev/tty; return 1
+  fi
+  if is_dir "$item"; then
+    echo "View applies to files only." > /dev/tty; return 1
+  fi
+
+  if ! _ensure_fresh_cache "$item"; then
+    echo "Failed to fetch file content." > /dev/tty; return 1
+  fi
+  local cache_file; cache_file="$(_cache_file_for "$item")"
+  less -- "$cache_file"
+}
+
+_set_mode() {
+  local mode="${1:-content}"
+  case "$mode" in
+    footer|content) : ;;
+    *) mode="content" ;;
+  esac
+  printf '%s' "$mode" > "$MODE_FILE"
+}
+
+_get_mode() {
+  if [ -s "$MODE_FILE" ]; then
+    cat -- "$MODE_FILE"
+  else
+    printf 'content'
+  fi
+}
+
+# Subcommand dispatcher
+case "${1:-}" in
+  --_preview_item) shift; _preview_item "$@"; exit 0 ;;
+  --_view_item_full) shift; _view_item_full "$@"; exit $? ;;
+  --_set_mode) shift; _set_mode "$@"; exit 0 ;;
+esac
+
+# ---------- Main loop ----------
+while true; do
+  REMOTE_DIR="$(get_remote_dir)"
+  STORAGE_VM_NAME="$(get_storage_vm_name)"
+  CURRENT_MODE="$(_get_mode)"
+
+  # Initial preview command based on persistent mode
+  if [ "$CURRENT_MODE" = "footer" ]; then
+    PREVIEW_INIT="echo \"$HELP_FOOTER\""
+  else
+    PREVIEW_INIT="$0 --_preview_item {}"
+  fi
+
+  CHOICE="$(
+    list_entries | "$FZF_BIN" \
+      --prompt "[$STORAGE_VM_NAME] remote:$REMOTE_DIR > " \
+      --height=100% \
+      --layout=reverse \
+      --border \
+      --header "Enter=open/edit • Ctrl+H=footer • Ctrl+G=stats/content • Ctrl+O=help • Esc=quit" \
+      --preview "$PREVIEW_INIT" \
+      --preview-window 'down,50%,border' \
+      --bind "ctrl-h:change-preview(echo \"$HELP_FOOTER\")+change-preview-window(down,50%,border)+execute-silent($0 --_set_mode footer)" \
+      --bind "ctrl-g:change-preview($0 --_preview_item {})+change-preview-window(down,50%,border)+execute-silent($0 --_set_mode content)" \
+      --bind "ctrl-o:execute(echo \"$(show_help)\" | less)" \
+      --expect=ctrl-u,ctrl-p,ctrl-d,ctrl-r,ctrl-y,ctrl-s,ctrl-n,ctrl-w,ctrl-j,ctrl-f
+  )" || exit 0
+
+  mapfile -t _lines <<< "$CHOICE"
+  key=""; item=""
+  if [ ${#_lines[@]} -eq 1 ]; then
+    item="${_lines[0]}"
+  elif [ ${#_lines[@]} -ge 2 ]; then
+    key="${_lines[0]}"
+    item="${_lines[1]}"
+  fi
+
+  if [ -z "${item:-}" ] && [ -z "${key:-}" ]; then
+    exit 0
+  fi
+
+  case "${key:-}" in
+    ctrl-u)
+      "$BACKEND" cd ..
+      continue
+      ;;
+    ctrl-n)
+      name="$(prompt_tty 'New directory name: ')"
+      if [ -n "$name" ]; then "$BACKEND" mkdir "$name" || err "mkdir failed: $name"
+      else echo "Canceled." > /dev/tty; fi
+      continue
+      ;;
+    ctrl-w)
+      localfile="$(prompt_tty 'Push local file path: ')"
+      if [ -n "$localfile" ]; then
+        if [ -f "$localfile" ]; then "$BACKEND" push "$localfile" || err "push failed: $localfile"
+        else err "local file not found: $localfile"; fi
+      else echo "Canceled." > /dev/tty; fi
+      continue
+      ;;
+    ctrl-j)
+      destpath="$(prompt_tty 'Jump to remote path: ')"
+      if [ -n "$destpath" ]; then "$BACKEND" cd "$destpath" || err "cd failed: $destpath"
+      else echo "Canceled." > /dev/tty; fi
+      continue
+      ;;
+  esac
+
+  if [ -z "${item:-}" ]; then
+    continue
+  fi
+
+  if [ "$item" = ".." ]; then
+    "$BACKEND" cd ..
+    continue
+  fi
+
+  case "${key:-}" in
+    "")
+      if is_dir "$item"; then "$BACKEND" cd "$item"
+      else "$BACKEND" edit "$item"; fi
+      ;;
+    ctrl-f)
+      "$0" --_view_item_full "$item"
+      ;;
+    ctrl-p)
+      if is_dir "$item"; then err "Pull applies to files only (selected is a directory)"
+      else "$BACKEND" pull "$item" || err "pull failed: $item"; fi
+      ;;
+    ctrl-d)
+      if is_dir "$item"; then
+        if confirm_tty "Remove directory '$item'? (must be empty)"; then "$BACKEND" rmdir "$item" || err "rmdir failed: $item"
+        else echo "Canceled." > /dev/tty; fi
+      else
+        if confirm_tty "Delete file '$item'?"; then "$BACKEND" rm "$item" || err "rm failed: $item"
+        else echo "Canceled." > /dev/tty; fi
+      fi
+      ;;
+    ctrl-r)
+      new="$(prompt_tty "Rename/Move '$item' to (dest path or new name): ")"
+      if [ -n "$new" ]; then "$BACKEND" mv "$item" "$new" || err "rename/move failed: $item -> $new"
+      else echo "Canceled." > /dev/tty; fi
+      ;;
+    ctrl-y)
+      dest="$(prompt_tty "Copy '$item' to (dest path): ")"
+      if [ -n "$dest" ]; then "$BACKEND" cp "$item" "$dest" || err "copy failed: $item -> $dest"
+      else echo "Canceled." > /dev/tty; fi
+      ;;
+    ctrl-s)
+      "$BACKEND" stat "$item" | less
+      ;;
+    *)
+      if is_dir "$item"; then "$BACKEND" cd "$item"
+      else "$BACKEND" edit "$item"; fi
+      ;;
+  esac
+done
+
