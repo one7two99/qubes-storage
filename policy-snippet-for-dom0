@@ -1,10 +1,10 @@
-user.StorageCopy * storage-qube allow
-user.StorageGet * storage-qube allow
-user.StorageLs * storage-qube allow
-user.StorageMove * storage-qube allow
-user.StorageStat * storage-qube allow
-user.StorageDelete * storage-qube allow
-user.StorageList * storage-qube allow
-user.StorageMkdir * storage-qube allow
-user.StoragePut * storage-qube allow
-user.StorageRmdir * storage-qube allow
+user.StorageCopy * my-untrusted my-data allow
+user.StorageGet * my-untrusted my-data allow
+user.StorageLs * my-untrusted my-data allow
+user.StorageMove * my-untrusted my-data allow
+user.StorageStat * my-untrusted my-data allow
+user.StorageDelete * my-untrusted my-data allow
+user.StorageList * my-untrusted my-data allow
+user.StorageMkdir * my-untrusted my-data allow
+user.StoragePut * my-untrusted my-data allow
+user.StorageRmdir * my-untrusted my-data allow
