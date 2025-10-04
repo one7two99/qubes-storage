@@ -1,14 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
-# Konfigurierbares Root-Verzeichnis
 BASEPATH="/home/user/shared"
 
-# Quelle und Ziel einlesen (zwei Zeilen)
+# Quelle und Ziel einlesen
 IFS= read -r SRC || { echo "Missing source path" >&2; exit 2; }
 IFS= read -r DST || { echo "Missing destination path" >&2; exit 2; }
 
-# Normalisieren und absichern
 SRC_SAFE="$(realpath -m -- "$BASEPATH/$SRC")"
 DST_SAFE="$(realpath -m -- "$BASEPATH/$DST")"
 
@@ -19,13 +17,14 @@ for P in "$SRC_SAFE" "$DST_SAFE"; do
   fi
 done
 
-if [[ ! -f "$SRC_SAFE" ]]; then
-  echo "Source file not found: $SRC" >&2
+# Quelle muss existieren (Datei ODER Verzeichnis)
+if [[ ! -e "$SRC_SAFE" ]]; then
+  echo "Source not found: $SRC" >&2
   exit 1
 fi
 
 # Zielverzeichnis sicherstellen
-mkdir -p "$(dirname "$DST_SAFE")"
+mkdir -p -- "$(dirname "$DST_SAFE")"
 
-# Verschieben (atomar im selben FS)
+# Bewegen (funktioniert für Dateien und Verzeichnisse)
 mv -f -- "$SRC_SAFE" "$DST_SAFE"

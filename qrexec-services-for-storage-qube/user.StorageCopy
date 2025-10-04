@@ -3,7 +3,6 @@ set -euo pipefail
 
 BASEPATH="/home/user/shared"
 
-# Quelle und Ziel
 IFS= read -r SRC || { echo "Missing source path" >&2; exit 2; }
 IFS= read -r DST || { echo "Missing destination path" >&2; exit 2; }
 
@@ -17,16 +16,22 @@ for P in "$SRC_SAFE" "$DST_SAFE"; do
   fi
 done
 
-if [[ ! -f "$SRC_SAFE" ]]; then
-  echo "Source file not found: $SRC" >&2
+if [[ -d "$SRC_SAFE" ]]; then
+  # Quelle ist ein Verzeichnis
+  if [[ -d "$DST_SAFE" || "$DST" = */ ]]; then
+    # in bestehendes/als Ordner interpretiertes Ziel kopieren
+    mkdir -p -- "$DST_SAFE"
+    cp -a -- "$SRC_SAFE" "$DST_SAFE/"
+  else
+    # „rename-copy“: Ziel wird als Ordnername neu angelegt, Inhalte hinein
+    mkdir -p -- "$DST_SAFE"
+    cp -a -- "$SRC_SAFE/." "$DST_SAFE/"
+  fi
+elif [[ -f "$SRC_SAFE" ]]; then
+  # Quelle ist eine Datei
+  mkdir -p -- "$(dirname "$DST_SAFE")"
+  cp -a -- "$SRC_SAFE" "$DST_SAFE"
+else
+  echo "Source not found: $SRC" >&2
   exit 1
 fi
-
-mkdir -p "$(dirname "$DST_SAFE")"
-
-# Kopie mit Sicherung
-TMP="$(mktemp --tmpdir="$(dirname "$DST_SAFE")" .copy-XXXXXX)"
-trap 'rm -f -- "$TMP"' EXIT
-
-cat -- "$SRC_SAFE" > "$TMP"
-mv -f -- "$TMP" "$DST_SAFE"
