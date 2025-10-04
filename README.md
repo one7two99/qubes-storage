@@ -1,236 +1,359 @@
-# qubes-storage — Sicherer Datei-Zugriff über Qrexec
+# Qubes Storage Helper
 
-Dieses Projekt bietet ein minimales, aber hart abgesichertes Dateispeicher-Interface für Qubes OS.  
-Ein **Storage‑Qube** (z. B. `storage-qube`) hält die Daten unter einem festgelegten Wurzelverzeichnis. Andere AppVMs greifen **nur per Qrexec** auf diesen Speicher zu – ohne Netzfreigaben und ohne direkt gemountete Volumes.
+Convenient, policy-controlled file storage for Qubes OS: a dedicated *storage qube* exports safe, minimal RPC services (list/copy/move/delete/…); *client qubes* use simple commands and an `fzf` TUI browser to work with files and directories inside the storage qube.
 
-Das CLI‑Werkzeug `qubes-storage` in den anfragenden VMs kapselt die Qrexec‑Aufrufe und stellt eine benutzerfreundliche Oberfläche bereit. Auf der Serverseite (im Storage‑Qube) sorgen Qrexec‑Service‑Skripte (`user.Storage…`) für strikte Pfadvalidierung, Größenlimits und atomare Schreibvorgänge.
+- Client CLI: `qubes-storage`
+- Client TUI: `qubes-storage-browse` (fzf-based)
+- Storage VM RPC services: `user.Storage*` (server-side scripts)
+- dom0 policy snippet: allowlisted, least-privilege qrexec rules
 
+> **License:** GPL-3.0-or-later (see bottom)
 
-## Architektur
+---
 
-```
-AppVM (Client)                           Storage‑Qube (Server)
------------------                        ----------------------
-qubes-storage  ── qrexec-client-vm ──▶   /etc/qubes-rpc/user.Storage*
- (CLI)                                     (Bash‑Skripte)
+## Table of Contents
 
-Statefile: ~/.cache/qubes-storage-path   Datenwurzel: /home/user/shared
-```
+1. [Architecture](#architecture)
+2. [Prerequisites](#prerequisites)
+3. [Install: Storage Qube](#install-storage-qube)
+4. [Install: dom0 Policy](#install-dom0-policy)
+5. [Install: Client (AppVM / Template)](#install-client-appvm--template)
+6. [How it works (Security model)](#how-it-works-security-model)
+7. [Usage: `qubes-storage` CLI](#usage-qubes-storage-cli)
+8. [Usage: `qubes-storage-browse` TUI](#usage-qubes-storage-browse-tui)
+9. [Configuration & Conventions](#configuration--conventions)
+10. [Troubleshooting](#troubleshooting)
+11. [FAQ](#faq)
+12. [License](#license)
 
-- **Client:** `qubes-storage` (Bash), verwaltet einen „Remote‑Arbeitsordner“ und spricht Qrexec‑Dienste an.
-- **Server:** Qrexec‑Dienste `user.Storage(List, Ls, Get, Put, Copy, Move, Delete, Mkdir, Rmdir, Stat)`, jeweils als eigenständige Skripte.
-- **Dom0‑Policy:** Legt fest, dass *nur* der definierte Storage‑Qube Ziel der Dienste ist.
+---
 
+## Architecture
 
-## Sicherheitsmodell (Kurzfassung)
+- **Storage Qube** (e.g., `my-data`)  
+  Hosts a **shared base directory**: `/home/user/shared`.  
+  Exposes narrowly-scoped qrexec services:
+  ```
+  user.StorageList  user.StorageLs   user.StorageStat
+  user.StorageGet   user.StoragePut
+  user.StorageCopy  user.StorageMove
+  user.StorageMkdir user.StorageRmdir
+  user.StorageDelete
+  ```
+  Each service validates paths and is jailed to `/home/user/shared`.
 
-1. **Pfad‑Jail:** Alle Dienste berechnen `SAFE` mit `realpath -m` relativ zu `BASEPATH` (Standard: `/home/user/shared`) und lehnen alles außerhalb ab (`[[ "$SAFE" != "$BASEPATH"* ]]`). Path‑Traversal (`../`) ist damit blockiert.
-2. **Größenlimits:** `Get` und `Put` respektieren `MAX_BYTES` (Umgebungsvariable). Standard im Code:
-   - `user.StorageGet`: `MAX_BYTES=104857600` (100 MiB)
-   - `user.StoragePut`: `MAX_BYTES=104857600` (100 MiB)
-3. **Atomare Writes:** `Put`/`Copy` schreiben in eine temporäre Datei im Zielverzeichnis und `mv`en diese anschließend (Crash‑sicherer, keine Teilzustände).
-4. **Minimal‑Oberfläche:** Kein Shell‑Globbing auf Serverseite; Parameter kommen über `stdin` (eine oder zwei Zeilen), wodurch Sonderzeichen robust sind.
-5. **Rechte:** `Put` setzt `chmod 0640` auf neue Dateien.
-6. **Rückgabecodes:**
-   - `2` bei ungültigem Pfad/Eingaben,
-   - `3` bei Überschreitung `MAX_BYTES`,
-   - `1` bei nicht gefundenen Quellen (z. B. `Move/Copy`).
+- **dom0**  
+  Policy explicitly allows a given **client qube** (e.g., `my-untrusted`) to call the storage services in the **storage qube** (e.g., `my-data`). No global allow.
 
+- **Client Qube(s)** (e.g., `my-untrusted`)  
+  - `qubes-storage` (CLI) issues qrexec calls (list/pull/push/mv/cp/rm/…)
+  - `qubes-storage-browse` (fzf TUI) gives a keyboard-driven browser with previews and persistent help footer.
 
-## Komponenten
+---
 
-### Client: `qubes-storage`
+## Prerequisites
 
-- **Speichert den Remote‑Arbeitsordner** in `~/.cache/qubes-storage-path`.
-- **Pfadnormalisierung** via `normalize_remote(base, add)`:
-  - absoluter Zusatz (`/foo`) überschreibt `base`,
-  - ansonsten `base/add`, Normalisierung via `realpath -m` unter künstlicher Root `/` und Entfernen des führenden `/`.
-- **Unterstützte Befehle:**
-  - `list [dir]` – zeilenweise Inhalte (Dirs `/`, Links `@`), Quelle: `user.StorageList`
-  - `ls [dir]` – `ls -lA` des Remote‑Verzeichnisses, Quelle: `user.StorageLs`
-  - `get <remote> [local]` – Datei holen, Quelle: `user.StorageGet`
-  - `put <localfile> [remote]` – Datei hochladen, Quelle: `user.StoragePut`
-  - `copy <remote-src> <remote-dst>` – Datei kopieren (remote→remote), Quelle: `user.StorageCopy`
-  - `move <remote-src> <remote-dst>` – Datei verschieben (remote→remote), Quelle: `user.StorageMove`
-  - `delete <remote>` – Datei löschen, Quelle: `user.StorageDelete`
-  - `mkdir <remote-dir>` / `rmdir <remote-dir>` – Verzeichnis anlegen/entfernen, Quellen: `user.StorageMkdir`/`user.StorageRmdir`
-  - `stat|details <remote>` – `stat` auf Pfad, Quelle: `user.StorageStat`
-  - `cd <remote-dir>` / `pwd` – Arbeitsordner verwalten (nur clientseitig)
-  - `gui-get` – Dateiauswahl per **rofi** und Download
-  - `gui-put` – Upload per Dateidialog (**zenity**)
-  - `edit <remote>` – Datei herunterladen, lokalen Editor öffnen (`$EDITOR` oder `nano`), zurückschreiben per `StoragePut`
+### In the **Storage Qube**
+- Linux user `user` with home directory containing `/home/user/shared` (created by the install steps below).
+- Standard GNU userland: `bash`, `coreutils` (`stat`, `realpath`, `mv`, `cp`, `rm`, `mkdir`, …), `awk`, `sed`, `grep`.
 
-> Hinweis: `gui-get` nutzt im Skript `user.StorageListFiles`. Dieser Service ist **nicht** Teil des Pakets. In der Praxis kann `user.StorageList` verwendet werden oder ein eigener `user.StorageListFiles`‑Wrapper bereitgestellt werden (siehe Erweiterungen).
+### In **Client Qubes** (and/or their Template)
+- `bash`
+- `fzf`
+- `less`
+- `coreutils`, `awk`, `sed`, `grep`
+- `file` (for MIME detection in previews; optional but recommended)
+- `hexdump` (usually from `bsdmainutils` or `util-linux`; optional)
 
-### Server: Qrexec‑Dienste (Storage‑Qube)
+> If you also want GUI “pull/push” from the CLI script, install `zenity` in the client qube. The TUI browser does **not** require `zenity`.
 
-Standard‑`BASEPATH`: `/home/user/shared` (anpassbar je Skriptkopf).
+---
 
-| Service              | stdin                                   | stdout                              | Beschreibung |
-|----------------------|------------------------------------------|-------------------------------------|--------------|
-| `user.StorageList`   | optional Pfad (1 Zeile; default `.`)     | Einträge mit Suffix (`/`, `@`)      | Flaches Listing (`find … -maxdepth 1`) |
-| `user.StorageLs`     | optional Pfad                            | `ls -lA` Ausgabe                    | Detail‑Listing |
-| `user.StorageGet`    | Pfad (1 Zeile)                           | Dateiinhalte                        | Download mit Größenlimit |
-| `user.StoragePut`    | Pfad (1 Zeile) + Dateiinhalt (rest)      | `OK`                                | Upload atomar, setzt Modus `0640` |
-| `user.StorageCopy`   | Quelle (Zeile 1), Ziel (Zeile 2)         | `OK` (implizit)                     | Kopie im Storage‑Qube (mit Temp‑Datei) |
-| `user.StorageMove`   | Quelle (Zeile 1), Ziel (Zeile 2)         | `OK` (implizit)                     | Atomarer Move im selben FS |
-| `user.StorageDelete` | Pfad (1 Zeile)                           | `OK`                                | Löschen einer Datei |
-| `user.StorageMkdir`  | Verzeichnisname (1 Zeile)                | —                                   | `mkdir -p` |
-| `user.StorageRmdir`  | Verzeichnisname (1 Zeile)                | —                                   | `rmdir` (scheitert, wenn nicht leer) |
-| `user.StorageStat`   | Pfad (1 Zeile)                           | `stat`‑Ausgabe                      | Metadaten |
+## Install: Storage Qube
 
+1. **Copy the RPC scripts** from this repo/archive into the storage qube (e.g., `my-data`) under `/etc/qubes-rpc/`:
 
-## Installation
+   Place the files in the storage qube:
+   ```
+   /etc/qubes-rpc/user.StorageList
+   /etc/qubes-rpc/user.StorageLs
+   /etc/qubes-rpc/user.StorageStat
+   /etc/qubes-rpc/user.StorageGet
+   /etc/qubes-rpc/user.StoragePut
+   /etc/qubes-rpc/user.StorageCopy
+   /etc/qubes-rpc/user.StorageMove
+   /etc/qubes-rpc/user.StorageMkdir
+   /etc/qubes-rpc/user.StorageRmdir
+   /etc/qubes-rpc/user.StorageDelete
+   ```
 
-### 1) Storage‑Qube vorbereiten
+   Make them executable:
+   ```bash
+   sudo chmod 0755 /etc/qubes-rpc/user.Storage*
+   ```
 
-1. Qube anlegen, z. B. `storage-qube` (ohne Netz, falls gewünscht).
-2. Verzeichnis für Daten anlegen:  
+2. **Create the base directory**:
    ```bash
    mkdir -p /home/user/shared
+   chown -R user:user /home/user/shared
+   chmod 0755 /home/user/shared
    ```
-3. Qrexec‑Services installieren (als `root`):
+
+3. **What the server scripts do (summary)**:
+   - **Path jail** to `/home/user/shared` using `realpath -m` and string-prefix checks.
+   - `StorageList`/`StorageLs` list directory entries (short/long).
+   - `StorageStat` returns `stat` for files/dirs.
+   - `StorageGet` streams a single file to the client.
+   - `StoragePut` writes/overwrites a file (size-capped via `MAX_BYTES`, default 100 MiB; adjust via env if desired).
+   - `StorageCopy` copies **files or directories** (recursive for dirs).
+   - `StorageMove` moves/renames **files or directories** (atomic within FS).
+   - `StorageMkdir` / `StorageRmdir` create/remove directories.
+   - `StorageDelete` deletes files.
+
+   > If you change `BASEPATH`, update both server and client to match.
+
+---
+
+## Install: dom0 Policy
+
+Create a dedicated policy file (Qubes 4.1/4.2 style) in dom0, e.g.:
+
+`/etc/qubes/policy.d/50-qubes-storage.policy`
+```text
+# Allow my-untrusted to call storage services in my-data
+user.StorageCopy   *  my-untrusted  my-data  allow
+user.StorageGet    *  my-untrusted  my-data  allow
+user.StorageLs     *  my-untrusted  my-data  allow
+user.StorageMove   *  my-untrusted  my-data  allow
+user.StorageStat   *  my-untrusted  my-data  allow
+user.StorageDelete *  my-untrusted  my-data  allow
+user.StorageList   *  my-untrusted  my-data  allow
+user.StorageMkdir  *  my-untrusted  my-data  allow
+user.StoragePut    *  my-untrusted  my-data  allow
+user.StorageRmdir  *  my-untrusted  my-data  allow
+```
+
+Replace `my-untrusted` and `my-data` with **your** client and storage VM names.  
+No restart needed; policy applies immediately to new qrexec calls.
+
+---
+
+## Install: Client (AppVM / Template)
+
+1. **Install the CLI `qubes-storage`** into a directory in `PATH`
+   (e.g. `/usr/local/bin` in a TemplateVM, or `~/bin` in an AppVM):
+
+   - Set the storage VM name inside the script:
+     ```bash
+     STORAGE_VM="my-data"
+     ```
+   - Ensure it’s executable:
+     ```bash
+     chmod 0755 /usr/local/bin/qubes-storage
+     ```
+
+   The script keeps a **current working directory** inside the storage VM in a state file:
+   ```
+   ~/.cache/qubes-storage-path
+   ```
+   Default is `"."`. It updates only when `cd` succeeds (i.e., path exists in the storage VM).
+
+2. **Install the TUI `qubes-storage-browse`** (fzf-based):
    ```bash
-   install -Dm0755 qrexec-services-for-storage-qube/user.Storage* /etc/qubes-rpc/
+   chmod 0755 /usr/local/bin/qubes-storage-browse
    ```
-   Alternativ in einem Paket unterbringen. Passen Sie bei Bedarf in jedem Skript `BASEPATH` an.
-4. Test lokal im Storage‑Qube (ohne Qrexec) ist nicht sinnvoll; Dienste erwarten Parameter via `stdin`.
+   The browser reads the storage VM name directly from the installed `qubes-storage` script by parsing the `STORAGE_VM="..."` line (no extra config is required). It maintains a small cache under:
+   ```
+   ~/.cache/qubes-storage-browse/
+   ```
 
-### 2) Dom0‑Policy setzen
+3. **Packages (client):**
+   ```bash
+   sudo dnf install -y fzf less file coreutils grep sed gawk util-linux
+   # optional for hex preview:
+   sudo dnf install -y util-linux   # provides hexdump on most distros
+   # optional GUI helpers (CLI only):
+   sudo dnf install -y zenity
+   ```
 
-Erstellen Sie z. B. `/etc/qubes/policy.d/30-qubes-storage.policy` mit folgendem Inhalt und passen Sie den Qube‑Namen an (hier: `storage-qube`):
+---
+
+## How it works (Security model)
+
+- All storage operations run **inside the storage qube**, restricted to `/home/user/shared` via `realpath -m` + strict prefix checks. Any path that would escape (e.g., `../../..`) is rejected.
+- `StoragePut` can enforce a max upload size (default `100 MiB` via `MAX_BYTES`).
+- `mv` and `cp` support **files and directories** (recursive copy for dirs).
+- dom0 policy explicitly ties **source VM** → **target VM** per service, no global wildcards.
+- Client tooling never executes code from the storage qube; it only sends paths/data to the RPC services.
+
+---
+
+## Usage: `qubes-storage` CLI
+
+Run `qubes-storage --help` to see the commands. The key commands are:
 
 ```
-user.StorageCopy  *  storage-qube  allow
-user.StorageGet   *  storage-qube  allow
-user.StorageLs    *  storage-qube  allow
-user.StorageMove  *  storage-qube  allow
-user.StorageStat  *  storage-qube  allow
-user.StorageDelete*  storage-qube  allow
-user.StorageList  *  storage-qube  allow
-user.StorageMkdir *  storage-qube  allow
-user.StoragePut   *  storage-qube  allow
-user.StorageRmdir *  storage-qube  allow
+qubes-storage ls [directory]      # short listing
+qubes-storage ll [directory]      # long listing
+qubes-storage pull <remote> [local]
+qubes-storage push <local>  [remote]
+qubes-storage rm <remote-file>
+qubes-storage cp <source> <dest>  # files or directories
+qubes-storage mv <source> <dest>  # rename/move (files or directories)
+qubes-storage mkdir <dirname>
+qubes-storage rmdir <dirname>
+qubes-storage stat <remote>
+qubes-storage cd <directory>
+qubes-storage pwd
+qubes-storage edit <remote-file>  # pulls to a temp file, opens $EDITOR, pushes back
+# optional GUI helpers if zenity present:
+qubes-storage pull-gui
+qubes-storage push-gui
 ```
 
-> Je nach Qubes‑Version kann die empfohlene Policy‑Syntax variieren. Die oben beigelegte Datei `policy-snippet-for-dom0` entspricht der im Repo verwendeten Syntax und funktioniert in typischen Qubes 4.1/4.2‑Setups.
+**Path semantics**
 
-### 3) Client‑VM(s) einrichten
+- Relative paths are relative to the current storage-VM working dir (tracked in `~/.cache/qubes-storage-path`).
+- `cd` only updates the cache if the target directory exists in the storage qube.
+- `pwd` prints the current remote directory (e.g., `Remote directory: a/b`).
 
-1. Kopieren Sie `qubes-storage` nach `/usr/local/bin/` und machen Sie es ausführbar:
-   ```bash
-   install -Dm0755 qubes-storage /usr/local/bin/qubes-storage
-   ```
-2. Am Skriptkopf `STORAGE_VM` auf den Namen des Storage‑Qubes setzen, z. B.:
-   ```bash
-   STORAGE_VM="storage-qube"
-   ```
-3. Optional: Abhängigkeiten für Komfortfunktionen installieren:
-   - `rofi` (für `gui-get`),
-   - `zenity` (für `gui-put`),
-   - `$EDITOR` (für `edit`; Standard ist `nano`).
+**Examples**
 
+```bash
+# list root of storage
+qubes-storage ls
+# create and enter a folder
+qubes-storage mkdir docs
+qubes-storage cd docs
+# upload a local file
+qubes-storage push ~/notes.txt notes.txt
+# get file details
+qubes-storage stat notes.txt
+# rename/move (same command)
+qubes-storage mv notes.txt 2025/notes-2025-10-04.txt
+# copy a directory recursively
+qubes-storage cp templates  archive/templates-backup
+# remove an empty directory
+qubes-storage rmdir templates
+```
 
-## Konfiguration
+---
 
-- **STORAGE_VM (Client):** Name des Ziel‑Qubes (Default: `my-data` → anpassen!).
-- **BASEPATH (Server):** Datenwurzel; pro Service‑Skript konfigurierbar (Default: `/home/user/shared`).
-- **MAX_BYTES (Server):** Upload/Download‑Limit via Umgebungsvariable:
+## Usage: `qubes-storage-browse` TUI
+
+Launch:
+```bash
+qubes-storage-browse
+```
+
+You’ll see a prompt like:
+```
+[my-data] remote:a/b >
+```
+…and an `fzf` list of entries. A preview pane at the bottom can show either stats/content or a persistent commands footer.
+
+**Basics**
+- **Enter**: enter directory / edit file (opens with the `qubes-storage edit` workflow).
+- `..` takes you up one directory.
+
+**Persistent preview/footer (toggle)**
+- **Ctrl+H**: show *footer* (commands) in the preview pane (persists).
+- **Ctrl+G**: return to *stats/content* preview (persists across actions and directory changes).
+
+**File preview**
+- Shows MIME type and the first *N* lines (default `200`) of text files; for binary files, a short hex dump.  
+  `PREVIEW_MAX_LINES` and `PREVIEW_MAX_BYTES` are tunable via environment variables.
+
+**View full file**
+- **Ctrl+F**: open the **full** file content in `less`.  
+  The browser maintains a small local cache; it automatically **re-pulls** the file whenever size or modification time changes in the storage qube (fingerprint check), so previews and views stay fresh after edits/pushes.
+
+**Navigation & actions (default bindings)**
+
+- **Ctrl+U**: up (`cd ..`)
+- **Ctrl+J**: jump to a remote path (`cd <path>`)
+- **Ctrl+N**: create directory (`mkdir`)
+- **Ctrl+R**: rename/move (`mv`) — works for files **and** directories
+- **Ctrl+Y**: copy (`cp`) — works for files **and** directories
+- **Ctrl+D**: delete (file → `rm`; dir → `rmdir`) — with confirmation
+- **Ctrl+P**: pull selected **file** to the current local directory
+- **Ctrl+W**: push a local file (prompt for local path) into the current remote directory
+- **Ctrl+S**: show `stat` in `less`
+- **Ctrl+O**: open full help in `less`
+- **Esc**: quit
+
+> The TUI reads the storage VM name by parsing the `STORAGE_VM="..."` line from your installed `qubes-storage` script (no separate config file needed). The prompt shows it as `[VM] remote:<path> >`.
+
+---
+
+## Configuration & Conventions
+
+- **Storage VM base path:** `/home/user/shared` (server-side).  
+  If you change it, update the RPC scripts accordingly and re-install.
+- **Client working dir state:** `${XDG_CACHE_HOME:-$HOME/.cache}/qubes-storage-path`
+- **TUI cache:** `${XDG_CACHE_HOME:-$HOME/.cache}/qubes-storage-browse/`
+- **TUI preview tuning (set as env vars if you like):**
   ```bash
-  # Beispiel: 100 MiB Limit für Put und Get
-  MAX_BYTES=104857600
+  PREVIEW_MAX_LINES=300 PREVIEW_MAX_BYTES=$((2*1024*1024)) qubes-storage-browse
   ```
-  *Hinweis:* In `user.StoragePut` steht derzeit `MAX_BYTES=1000000` (≈1 MiB) im Code. Passen Sie dies an oder exportieren Sie `MAX_BYTES` in der Service‑Umgebung.
 
-
-## Verwendung (Beispiele)
-
-```bash
-# Arbeitsordner setzen (relativ zur Datenwurzel)
-qubes-storage cd projects/demo
-
-# Hochladen
-qubes-storage put ./README.md      # → remote: projects/demo/README.md
-qubes-storage put ./logo.png assets/logo.png
-
-# Auflisten
-qubes-storage list .               # flache Liste, / für Verzeichnisse
-qubes-storage ls .                 # Details (ls -lA)
-
-# Download
-qubes-storage get assets/logo.png ./logo.png
-
-# Kopieren/Verschieben/Löschen
-qubes-storage copy    assets/logo.png assets/logo@2x.png
-qubes-storage move    assets/tmp.txt assets/archive/tmp.txt
-qubes-storage delete  assets/old.bin
-
-# Metadaten
-qubes-storage stat assets/logo.png
-
-# GUI‑Flows
-qubes-storage gui-put
-qubes-storage gui-get
-```
-
-**Exitcodes & Fehlertexte** sind sprechend gehalten (z. B. „Invalid path“, „File too large“). Beim `get` meldet das CLI „Fehler: get fehlgeschlagen“ und gibt Code 1 zurück.
-
-## Erweiterungen / Roadmap
-
-- **`user.StorageListFiles`:** Das CLI referenziert diesen Dienst in `gui-get`. Entweder:
-  - `user.StorageList` verwenden (einfacher Drop‑in in der Case‑Branch) oder
-  - einen dedizierten Dienst hinzufügen, der nur Dateien (ohne `/`) listet.
-- **Write‑Once‑Policy:** Separate Dienste mit restriktiver Dom0‑Policy (nur `Get/List`) für „Reader‑VMs“.
-- **Quotas/Rate‑Limits:** Serverseitig via cgroups oder `MAX_BYTES` je Aufruf dynamisch festlegen.
-- **Logging/Auditing:** Audit‑Trails in der Storage‑VM, z. B. via `logger` mit `QREXEC_REMOTE_DOMAIN`.
-- **Paketierung:** RPM/DEB für einfache Verteilung; systemweiter `DEFAULT_BASEPATH` in `/etc/default/qubes-storage`.
-
-
-## Testen
-
-In einer beliebigen AppVM (Client):
-
-```bash
-# trocken: nur Listen/Stat
-qubes-storage list .
-qubes-storage stat README.md
-
-# Roundtrip:
-echo "hello" > /tmp/hello.txt
-qubes-storage put /tmp/hello.txt demo/hello.txt
-qubes-storage get demo/hello.txt /tmp/hello.out
-diff -u /tmp/hello.txt /tmp/hello.out
-```
-
-Serverseitige Fehlerfälle provozieren („Invalid path“, zu große Datei), um Policy und Limits zu verifizieren.
-
+---
 
 ## Troubleshooting
 
-- **`Permission denied`/Policy‑Prompts:** Dom0‑Policy prüfen. Ziel‑Qube‑Name muss zu `STORAGE_VM` passen.
-- **`Invalid path`:** Pfad liegt außerhalb `BASEPATH` oder Ziel existiert nicht. Pfade ohne führendes `/` verwenden (Client normalisiert korrekt).
-- **`File too large` (Exit 3):** `MAX_BYTES` erhöhen oder Datei segmentieren.
-- **`rmdir: Directory not empty`:** Erst Inhalte löschen oder `StorageMove` nutzen, um umzustrukturieren.
+**“Permission denied” on qrexec / service not found**  
+- Verify dom0 policy rules (typos, wrong VM names).
+- Ensure `/etc/qubes-rpc/user.Storage*` exist in the **storage VM** and are **executable**.
 
+**`cd` appears to “forget” the directory**  
+- `cd` only updates the client cache if the directory **exists** on the storage side. Check with:
+  ```bash
+  printf '%s\n' "<dir>" | qrexec-client-vm my-data user.StorageStat
+  ```
 
-## Sicherheitshinweise
+**TUI preview doesn’t match edited file**  
+- The browser auto-refreshes previews via a fingerprint check (size + modify timestamp). If you still observe stale content, ensure:
+  - `stat` output in the storage VM includes `Size:` and `Modify:` lines (GNU `stat`).
+  - Client and storage qube clocks are sane.
 
-- Dienste laufen in der Storage‑VM **ohne Root**. Pflegen Sie restriktive Dateirechte im Datenbaum.
-- Dom0‑Policy restriktiv halten (nur gewünschte Aufrufer erlauben, ggf. `ask, default_target=storage-qube`).
-- Keine nicht‑validierten Daten an Shell‑Expansion übergeben; dieses Repo nutzt ausschließlich `stdin` und `--`‑Optionen.
-- Optional die Storage‑VM vom Netz trennen.
+**Enter triggers wrong action**  
+- In `fzf`, `Enter` equals `Ctrl+M`. The TUI does **not** bind `Ctrl+M` to other actions; if you customize bindings, avoid `Ctrl+M`.
 
+**Binary file previews look noisy**  
+- Install `util-linux` (for `hexdump`) to get a compact hex dump; or press **Ctrl+F** to view the file in `less` instead.
 
-## Lizenz
+---
 
-Creative Commons Attribution-NonCommercial 4.0 International Public License
-- freie private, nichtkommerzielle Nutzung,
-- Namensnennung ist verpflichtend,
-- kommerzielle Nutzung nur mit Zustimmung.
+## FAQ
 
+**Q: Why are “rename” and “move” a single command?**  
+Because on Unix, `mv` already does both: rename within a directory or move across directories. The server’s `StorageMove` supports files **and** directories.
 
-## Dateien im Repository
+**Q: Can I restrict which client qubes may call the storage services?**  
+Yes — that’s exactly what the dom0 policy does. Use per-VM rules; don’t use `@anyvm` unless you really mean it.
 
-- `qubes-storage` – Client‑CLI
-- `qrexec-services-for-storage-qube/user.Storage*` – Server‑Dienste
-- `policy-snippet-for-dom0` – Beispiel‑Policy für Dom0
+**Q: Can I change the base directory?**  
+Yes. Adjust `BASEPATH` in the storage scripts and re-deploy. Keep the `realpath`/prefix checks.
+
+---
+
+## License
+
+This project is released under the **GNU General Public License v3.0 or later** (GPLv3+).
+
+```
+Qubes Storage Helper
+Copyright (C) 2025  one7two99
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published
+by the Free Software Foundation, version 3 of the License.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+```
